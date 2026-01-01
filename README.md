@@ -210,6 +210,82 @@ NODE_ENV=production
 
 **⚠️ CRITICAL: Auth will fail without these exact values**
 
+Fulling supports two authentication modes:
+1. **Single-User Mode** (Recommended for production) - One admin user, no GitHub OAuth
+2. **Multi-User Mode** (Development/testing) - GitHub OAuth with multi-user support
+
+---
+
+### 🔐 Single-User Mode (Recommended)
+
+**Best for production deployments with a single administrator.**
+
+#### Step 1: Generate Password Hash
+
+```bash
+node scripts/hash-password.cjs "YourSecurePassword"
+```
+
+This will output a bcrypt hash like:
+```
+$2b$10$Q5mtZnZ4KDEpDgCEmrAP.u.6j0z7BT8WkaydX5H6W7QXFUfYMfMBq
+```
+
+#### Step 2: Set Environment Variables in Vercel
+
+In Vercel Dashboard → Project Settings → **Environment Variables**, add:
+
+```env
+# Required - Core Auth
+NEXTAUTH_URL=https://fulling.vercel.app
+NEXTAUTH_SECRET=<generate with: openssl rand -base64 32>
+
+# Required - Single-User Mode
+AUTH_MODE=single_user
+ENABLE_PASSWORD_AUTH=true
+ENABLE_GITHUB_AUTH=false
+ADMIN_USERNAME=your-admin-username
+ADMIN_PASSWORD_HASH=<hash from step 1>
+
+# Required - Database (for project management)
+DATABASE_URL=postgresql://<user>:<password>@<host>:<port>/<database>
+
+# Optional
+NODE_ENV=production
+```
+
+#### Step 3: Deploy and Verify
+
+After setting env vars, redeploy and check:
+```
+https://fulling.vercel.app/api/health-auth
+```
+
+Should return:
+```json
+{
+  "status": "healthy",
+  "ok": true,
+  "mode": "single_user",
+  "hasAdminUsername": true,
+  "hasAdminPasswordHash": true,
+  "passwordAuthEnabled": true,
+  "githubAuthEnabled": false
+}
+```
+
+#### Rotating the Admin Password
+
+1. Generate new hash: `node scripts/hash-password.cjs "NewPassword"`
+2. Update `ADMIN_PASSWORD_HASH` in Vercel
+3. Redeploy
+
+---
+
+### 🌐 Multi-User Mode (Development/Testing)
+
+**Supports GitHub OAuth and multiple users. Requires database for user management.**
+
 #### Step 1: Create GitHub OAuth Application
 1. Go to https://github.com/settings/developers
 2. Click **OAuth Apps** → **New OAuth App**
@@ -237,7 +313,28 @@ openssl rand -base64 32
 ```
 Copy output (e.g., `ZXjK9+qW8vL2mNxP4hRqA1bC3dEfGhIjKlMnOpQrStU=`) to Vercel
 
-#### Step 4: Verify Configuration
+#### Step 4: Set Environment Variables in Vercel
+
+```env
+# Required - Core Auth
+NEXTAUTH_URL=https://fulling.vercel.app
+NEXTAUTH_SECRET=<from step 3>
+
+# Required - Multi-User Mode
+AUTH_MODE=multi_user
+ENABLE_PASSWORD_AUTH=true
+ENABLE_GITHUB_AUTH=true
+GITHUB_CLIENT_ID=<from step 1>
+GITHUB_CLIENT_SECRET=<from step 1>
+
+# Required - Database
+DATABASE_URL=<from step 2>
+
+# Optional
+NODE_ENV=production
+```
+
+#### Step 5: Verify Configuration
 After setting all env vars and redeploying, check:
 ```
 https://fulling.vercel.app/api/health-auth

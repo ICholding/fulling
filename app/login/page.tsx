@@ -35,7 +35,8 @@ function LoginContent() {
         const response = await fetch('/api/health-auth');
         if (response.ok) {
           const data = await response.json();
-          setEnableGithub(data.hasGitHub === true);
+          // Check both hasGitHub (credentials present) AND githubAuthEnabled (feature flag)
+          setEnableGithub(data.hasGitHub === true && data.githubAuthEnabled === true);
         }
       } catch (err) {
         console.error('[LoginPage] Failed to check GitHub auth status:', err);

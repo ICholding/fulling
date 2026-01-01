@@ -4,27 +4,34 @@
  * GET /api/health-auth
  *
  * Returns detailed auth configuration status without exposing secrets
+ * Supports both single-user and multi-user mode detection
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 
 import { getAuthHealthSummary, validateAuthEnv } from '@/lib/env-auth'
+import { getSingleUserHealthSummary } from '@/lib/auth-single-user'
 
 export async function GET(request: NextRequest) {
   try {
     const validation = validateAuthEnv()
     const health = getAuthHealthSummary(validation)
 
+    // In single-user mode, also include single-user specific health info
+    const singleUserHealth = validation.mode === 'single_user' ? getSingleUserHealthSummary() : null
+
     if (validation.isValid) {
       return NextResponse.json({
         status: 'healthy',
         ...health,
+        ...(singleUserHealth && { singleUser: singleUserHealth }),
       })
     } else {
       return NextResponse.json(
         {
           status: 'unhealthy',
           ...health,
+          ...(singleUserHealth && { singleUser: singleUserHealth }),
           error: 'Auth configuration is incomplete or invalid',
         },
         { status: 503 } // Service Unavailable

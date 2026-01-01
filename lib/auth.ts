@@ -3,6 +3,7 @@ import NextAuth from 'next-auth'
 import Credentials from 'next-auth/providers/credentials'
 import GitHub from 'next-auth/providers/github'
 
+import { authenticateSingleUser } from '@/lib/auth-single-user'
 import { prisma } from '@/lib/db'
 import { env } from '@/lib/env'
 import { formatAuthValidationError, validateAuthEnv } from '@/lib/env-auth'
@@ -13,6 +14,10 @@ import { createAiproxyToken } from '@/lib/services/aiproxy'
 
 const logger = baseLogger.child({ module: 'lib/auth' })
 const DEBUG_AUTH = process.env.DEBUG_AUTH === 'true' || process.env.NODE_ENV !== 'production'
+
+// Determine auth mode
+const AUTH_MODE = env.AUTH_MODE || 'single_user'
+const IS_SINGLE_USER_MODE = AUTH_MODE === 'single_user' || !!env.ADMIN_USERNAME
 
 // CRITICAL: Validate auth environment before NextAuth initialization
 const authValidation = validateAuthEnv()
@@ -50,12 +55,18 @@ if (!authValidation.isValid) {
 // Log auth environment status at startup
 if (DEBUG_AUTH) {
   logger.info('=== AUTH STARTUP DEBUG ===')
+  logger.info(`AUTH_MODE: ${AUTH_MODE}`)
+  logger.info(`IS_SINGLE_USER_MODE: ${IS_SINGLE_USER_MODE}`)
   logger.info(`NEXTAUTH_URL: ${process.env.NEXTAUTH_URL}`)
   logger.info(
     `NEXTAUTH_SECRET: ${process.env.NEXTAUTH_SECRET ? '[SET - ' + process.env.NEXTAUTH_SECRET.length + ' chars]' : '[MISSING]'}`
   )
   logger.info(`ENABLE_PASSWORD_AUTH: ${process.env.ENABLE_PASSWORD_AUTH}`)
   logger.info(`ENABLE_GITHUB_AUTH: ${process.env.ENABLE_GITHUB_AUTH}`)
+  if (IS_SINGLE_USER_MODE) {
+    logger.info(`ADMIN_USERNAME: ${process.env.ADMIN_USERNAME ? '[SET]' : '[MISSING]'}`)
+    logger.info(`ADMIN_PASSWORD_HASH: ${process.env.ADMIN_PASSWORD_HASH ? '[SET]' : '[MISSING]'}`)
+  }
   logger.info(`GITHUB_CLIENT_ID: ${process.env.GITHUB_CLIENT_ID ? '[SET]' : '[MISSING]'}`)
   logger.info(`GITHUB_CLIENT_SECRET: ${process.env.GITHUB_CLIENT_SECRET ? '[SET]' : '[MISSING]'}`)
   logger.info(`DATABASE_URL: ${process.env.DATABASE_URL ? '[SET]' : '[MISSING]'}`)
@@ -71,105 +82,154 @@ const buildProviders = () => {
 
   // Password authentication (Credentials)
   if (env.ENABLE_PASSWORD_AUTH) {
-    logger.info('Password authentication is ENABLED')
-    providers.push(
-      Credentials({
-        name: 'credentials',
-        credentials: {
-          username: { label: 'Username', type: 'text' },
-          password: { label: 'Password', type: 'password' },
-        },
-        async authorize(credentials) {
-          if (!credentials?.username || !credentials?.password) {
-            if (DEBUG_AUTH) logger.info('Missing username or password')
-            return null
-          }
+    logger.info(`Password authentication is ENABLED (mode: ${AUTH_MODE})`)
+    
+    if (IS_SINGLE_USER_MODE) {
+      // SINGLE-USER MODE: Only allow one admin user from env vars
+      logger.info('Using SINGLE-USER authentication mode')
+      providers.push(
+        Credentials({
+          name: 'credentials',
+          credentials: {
+            username: { label: 'Username', type: 'text' },
+            password: { label: 'Password', type: 'password' },
+          },
+          async authorize(credentials) {
+            if (!credentials?.username || !credentials?.password) {
+              logger.warn('[Single-User] Missing username or password')
+              return null
+            }
 
-          const username = credentials.username as string
-          const password = credentials.password as string
+            const username = credentials.username as string
+            const password = credentials.password as string
 
-          if (DEBUG_AUTH) logger.info(`[Credentials] Attempting login for: ${username}`)
+            if (DEBUG_AUTH) logger.info(`[Single-User] Attempting login for: ${username}`)
 
-          try {
-            // Find user by username (providerUserId in PASSWORD identity)
-            const identity = await prisma.userIdentity.findUnique({
-              where: {
-                unique_provider_user: {
-                  provider: 'PASSWORD',
-                  providerUserId: username,
-                },
-              },
-              include: {
-                user: true,
-              },
-            })
+            try {
+              // Authenticate against env vars (no database lookups)
+              const user = await authenticateSingleUser(username, password)
+              
+              if (!user) {
+                logger.warn(`[Single-User] Authentication failed for: ${username}`)
+                return null
+              }
 
-            if (!identity) {
-              // User doesn't exist - auto-register
-              if (DEBUG_AUTH) logger.info(`[Auto-Register] Creating new user: ${username}`)
-              const passwordHash = await bcrypt.hash(password, 10)
+              if (DEBUG_AUTH) logger.info(`[Single-User] Authentication successful: ${user.id}`)
+              return user
+            } catch (error) {
+              logger.error(`[Single-User] Error in authorize: ${error}`)
+              if (DEBUG_AUTH) {
+                logger.error(
+                  `[Single-User] Full stack: ${error instanceof Error ? error.stack : String(error)}`
+                )
+              }
+              return null
+            }
+          },
+        })
+      )
+    } else {
+      // MULTI-USER MODE: Database-backed authentication with auto-registration
+      logger.info('Using MULTI-USER authentication mode')
+      providers.push(
+        Credentials({
+          name: 'credentials',
+          credentials: {
+            username: { label: 'Username', type: 'text' },
+            password: { label: 'Password', type: 'password' },
+          },
+          async authorize(credentials) {
+            if (!credentials?.username || !credentials?.password) {
+              if (DEBUG_AUTH) logger.info('Missing username or password')
+              return null
+            }
 
-              const newUser = await prisma.user.create({
-                data: {
-                  name: username,
-                  identities: {
-                    create: {
-                      provider: 'PASSWORD',
-                      providerUserId: username,
-                      metadata: { passwordHash },
-                      isPrimary: true,
-                    },
+            const username = credentials.username as string
+            const password = credentials.password as string
+
+            if (DEBUG_AUTH) logger.info(`[Credentials] Attempting login for: ${username}`)
+
+            try {
+              // Find user by username (providerUserId in PASSWORD identity)
+              const identity = await prisma.userIdentity.findUnique({
+                where: {
+                  unique_provider_user: {
+                    provider: 'PASSWORD',
+                    providerUserId: username,
                   },
+                },
+                include: {
+                  user: true,
                 },
               })
 
-              if (DEBUG_AUTH)
-                logger.info(`[Auto-Register] User created successfully: ${newUser.id}`)
+              if (!identity) {
+                // User doesn't exist - auto-register
+                if (DEBUG_AUTH) logger.info(`[Auto-Register] Creating new user: ${username}`)
+                const passwordHash = await bcrypt.hash(password, 10)
 
-              return {
-                id: newUser.id,
-                name: newUser.name || username,
+                const newUser = await prisma.user.create({
+                  data: {
+                    name: username,
+                    identities: {
+                      create: {
+                        provider: 'PASSWORD',
+                        providerUserId: username,
+                        metadata: { passwordHash },
+                        isPrimary: true,
+                      },
+                    },
+                  },
+                })
+
+                if (DEBUG_AUTH)
+                  logger.info(`[Auto-Register] User created successfully: ${newUser.id}`)
+
+                return {
+                  id: newUser.id,
+                  name: newUser.name || username,
+                }
               }
-            }
 
-            // User exists - verify password
-            const metadata = identity.metadata as { passwordHash?: string }
-            const passwordHash = metadata.passwordHash
+              // User exists - verify password
+              const metadata = identity.metadata as { passwordHash?: string }
+              const passwordHash = metadata.passwordHash
 
-            if (!passwordHash) {
-              if (DEBUG_AUTH) logger.warn(`No password hash found for user: ${username}`)
+              if (!passwordHash) {
+                if (DEBUG_AUTH) logger.warn(`No password hash found for user: ${username}`)
+                return null
+              }
+
+              const passwordMatch = await bcrypt.compare(password, passwordHash)
+              if (!passwordMatch) {
+                if (DEBUG_AUTH) logger.warn(`[Auth Failed] Invalid password for user: ${username}`)
+                return null
+              }
+
+              // Authentication successful
+              if (DEBUG_AUTH) logger.info(`[Auth Success] User logged in: ${username}`)
+              return {
+                id: identity.user.id,
+                name: identity.user.name || username,
+              }
+            } catch (error) {
+              logger.error(`[Auth Error] Error in authorize: ${error}`)
+              if (DEBUG_AUTH)
+                logger.error(
+                  `[Auth Error] Full stack: ${error instanceof Error ? error.stack : String(error)}`
+                )
               return null
             }
-
-            const passwordMatch = await bcrypt.compare(password, passwordHash)
-            if (!passwordMatch) {
-              if (DEBUG_AUTH) logger.warn(`[Auth Failed] Invalid password for user: ${username}`)
-              return null
-            }
-
-            // Authentication successful
-            if (DEBUG_AUTH) logger.info(`[Auth Success] User logged in: ${username}`)
-            return {
-              id: identity.user.id,
-              name: identity.user.name || username,
-            }
-          } catch (error) {
-            logger.error(`[Auth Error] Error in authorize: ${error}`)
-            if (DEBUG_AUTH)
-              logger.error(
-                `[Auth Error] Full stack: ${error instanceof Error ? error.stack : String(error)}`
-              )
-            return null
-          }
-        },
-      })
-    )
+          },
+        })
+      )
+    }
   } else {
     logger.info('Password authentication is DISABLED')
   }
 
-  // Sealos authentication (Credentials)
-  if (env.ENABLE_SEALOS_AUTH) {
+  // Sealos authentication (Credentials) - NOT AVAILABLE IN SINGLE-USER MODE
+  if (env.ENABLE_SEALOS_AUTH && !IS_SINGLE_USER_MODE) {
     logger.info('Sealos authentication is ENABLED')
     providers.push(
       Credentials({
@@ -424,11 +484,15 @@ const buildProviders = () => {
       })
     )
   } else {
-    logger.info('Sealos authentication is DISABLED')
+    if (env.ENABLE_SEALOS_AUTH) {
+      logger.info('Sealos authentication is DISABLED (not available in single-user mode)')
+    } else {
+      logger.info('Sealos authentication is DISABLED')
+    }
   }
 
-  // GitHub OAuth
-  if (env.ENABLE_GITHUB_AUTH) {
+  // GitHub OAuth - DISABLED IN SINGLE-USER MODE
+  if (env.ENABLE_GITHUB_AUTH && !IS_SINGLE_USER_MODE) {
     logger.info('GitHub authentication is ENABLED')
     if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
       const missingVars = []
@@ -453,7 +517,11 @@ const buildProviders = () => {
       logger.info('GitHub OAuth provider registered successfully')
     }
   } else {
-    logger.info('GitHub authentication is DISABLED. Set ENABLE_GITHUB_AUTH=true to enable.')
+    if (IS_SINGLE_USER_MODE && env.ENABLE_GITHUB_AUTH) {
+      logger.info('GitHub authentication is DISABLED (not available in single-user mode)')
+    } else {
+      logger.info('GitHub authentication is DISABLED. Set ENABLE_GITHUB_AUTH=true to enable.')
+    }
   }
 
   if (providers.length === 0) {
@@ -467,6 +535,28 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
   providers: buildProviders(),
   callbacks: {
     async signIn({ user, account, profile }) {
+      // SINGLE-USER MODE: Only allow admin user (credentials provider)
+      if (IS_SINGLE_USER_MODE) {
+        if (account?.provider === 'credentials') {
+          // Only allow if user.id === 'admin' (set by authenticateSingleUser)
+          if (user?.id !== 'admin') {
+            logger.error(`[Single-User] Unauthorized sign-in attempt: user.id=${user?.id}`)
+            return false
+          }
+          if (DEBUG_AUTH) logger.info(`[Single-User] Admin sign-in authorized`)
+          return true
+        } else if (account?.provider === 'github') {
+          // GitHub is ALWAYS blocked in single-user mode
+          logger.error(`[Single-User] GitHub sign-in blocked in single-user mode`)
+          return false
+        } else {
+          // Any other provider is blocked in single-user mode
+          logger.error(`[Single-User] Provider ${account?.provider} blocked in single-user mode`)
+          return false
+        }
+      }
+
+      // MULTI-USER MODE: Handle GitHub OAuth normally
       if (account?.provider === 'github') {
         if (DEBUG_AUTH)
           logger.info(`[GitHub] signIn callback triggered for user: ${user?.name || user?.email}`)
@@ -557,6 +647,10 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         if (DEBUG_AUTH) logger.info(`[JWT] Creating JWT token for user: ${user.id}`)
         token.id = user.id
         token.name = user.name
+        // In single-user mode, always set role to admin
+        if (IS_SINGLE_USER_MODE && user.id === 'admin') {
+          token.role = 'admin'
+        }
       }
       return token
     },
@@ -566,6 +660,10 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
         if (DEBUG_AUTH) logger.info(`[Session] Creating session for user: ${token.id}`)
         session.user.id = token.id as string
         session.user.name = token.name as string | null | undefined
+        // In single-user mode, always set role to admin
+        if (IS_SINGLE_USER_MODE && token.id === 'admin') {
+          session.user.role = 'admin'
+        }
       }
       return session
     },
@@ -621,12 +719,16 @@ declare module 'next-auth' {
     user: {
       id: string
       name?: string | null
+      email?: string | null
+      role?: string
     }
   }
 
   interface User {
     id: string
     name?: string | null
+    email?: string | null
+    role?: string
   }
 }
 
@@ -636,5 +738,6 @@ declare module 'next-auth/jwt' {
   interface JWT {
     id?: string
     name?: string | null
+    role?: string
   }
 }
