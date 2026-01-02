@@ -9,10 +9,10 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 
-import { getAuthHealthSummary, validateAuthEnv } from '@/lib/env-auth'
 import { getSingleUserHealthSummary } from '@/lib/auth-single-user'
+import { getAuthHealthSummary, validateAuthEnv } from '@/lib/env-auth'
 
-export async function GET(request: NextRequest) {
+export async function GET(_request: NextRequest) {
   try {
     const validation = validateAuthEnv()
     const health = getAuthHealthSummary(validation)

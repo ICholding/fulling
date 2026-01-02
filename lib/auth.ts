@@ -4,6 +4,7 @@ import Credentials from 'next-auth/providers/credentials'
 import GitHub from 'next-auth/providers/github'
 
 import { authenticateSingleUser } from '@/lib/auth-single-user'
+import { getConfigLog, isConfigValid } from '@/lib/config'
 import { prisma } from '@/lib/db'
 import { env } from '@/lib/env'
 import { formatAuthValidationError, validateAuthEnv } from '@/lib/env-auth'
@@ -21,6 +22,12 @@ const IS_SINGLE_USER_MODE = AUTH_MODE === 'single_user' || !!env.ADMIN_USERNAME
 
 // CRITICAL: Validate auth environment before NextAuth initialization
 const authValidation = validateAuthEnv()
+
+// Log structured config validation (always, for monitoring)
+if (!isConfigValid()) {
+  console.error(getConfigLog())
+}
+
 if (!authValidation.isValid) {
   const errorMsg = formatAuthValidationError(authValidation)
   logger.error(errorMsg)
@@ -83,7 +90,7 @@ const buildProviders = () => {
   // Password authentication (Credentials)
   if (env.ENABLE_PASSWORD_AUTH) {
     logger.info(`Password authentication is ENABLED (mode: ${AUTH_MODE})`)
-    
+
     if (IS_SINGLE_USER_MODE) {
       // SINGLE-USER MODE: Only allow one admin user from env vars
       logger.info('Using SINGLE-USER authentication mode')
@@ -108,7 +115,7 @@ const buildProviders = () => {
             try {
               // Authenticate against env vars (no database lookups)
               const user = await authenticateSingleUser(username, password)
-              
+
               if (!user) {
                 logger.warn(`[Single-User] Authentication failed for: ${username}`)
                 return null

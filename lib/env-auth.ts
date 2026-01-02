@@ -80,8 +80,11 @@ export function validateAuthEnv(): AuthEnvValidationResult {
     // Validate NEXTAUTH_URL format
     try {
       const url = new URL(process.env.NEXTAUTH_URL)
-      // Check if it's the production domain in production
-      if (process.env.NODE_ENV === 'production') {
+      // Check if it's the production domain in production (skip if localhost)
+      const isLocalhost =
+        process.env.NEXTAUTH_URL.includes('localhost') ||
+        process.env.NEXTAUTH_URL.includes('127.0.0.1')
+      if (process.env.NODE_ENV === 'production' && !isLocalhost) {
         if (!process.env.NEXTAUTH_URL.includes('fulling.vercel.app')) {
           result.issues.push(
             `NEXTAUTH_URL is "${process.env.NEXTAUTH_URL}" but should be "https://fulling.vercel.app" in production. ` +
@@ -89,7 +92,7 @@ export function validateAuthEnv(): AuthEnvValidationResult {
           )
         }
       }
-    } catch (e) {
+    } catch (_error) {
       result.issues.push(`NEXTAUTH_URL is not a valid URL: ${process.env.NEXTAUTH_URL}`)
     }
   }
@@ -114,9 +117,7 @@ export function validateAuthEnv(): AuthEnvValidationResult {
 
     // Ensure password auth is enabled
     if (process.env.ENABLE_PASSWORD_AUTH !== 'true') {
-      result.issues.push(
-        'ENABLE_PASSWORD_AUTH must be set to "true" for single-user mode.'
-      )
+      result.issues.push('ENABLE_PASSWORD_AUTH must be set to "true" for single-user mode.')
     }
 
     // GitHub auth should be disabled in single-user mode
@@ -236,7 +237,7 @@ export function formatAuthValidationError(validation: AuthEnvValidationResult): 
     lines.push('  • GITHUB_CLIENT_SECRET=<from GitHub OAuth app>')
     lines.push('  • DATABASE_URL=postgresql://<user:password@host/db>')
   }
-  
+
   lines.push('')
   lines.push('TO FIX:')
   lines.push('  1. Go to Vercel Dashboard → Project Settings → Environment Variables')
